@@ -22,6 +22,46 @@ struct commandline {
 
 // struct commandline *currLine;
 int lastExitStatus = 0;
+int smallshPid;
+
+// functions declarations
+struct commandline *getInput(char *);
+struct commandline *createCommandline(char *);
+void destroyCommandline(struct commandline *);
+void changeDirectory(struct commandline *);
+void printExitStatus(bool);
+void otherCommands(struct commandline *);
+
+int main(void) {
+  char *line = malloc(MAX_CMD_LINE * sizeof(char));
+  struct commandline *currLine = getInput(line);
+  smallshPid = getpid();
+
+  // command
+  while (currLine == NULL || strcmp(currLine->command, "exit") != 0) {
+    if (currLine == NULL || strcmp(currLine->command, "#") == 0) {
+      // blank or # comment, get input again
+      currLine = getInput(line);
+    } else if (strcmp(currLine->command, "cd") == 0) {
+      // cd
+      changeDirectory(currLine);
+    } else if (strcmp(currLine->command, "status") == 0) {
+      // status
+      printExitStatus(currLine->background);
+    } else {
+      // must fork
+      otherCommands(currLine);
+    }
+    currLine = getInput(line);
+  }
+  // "exit" MUST KILL ALL PROCESSES AND JOBS BEFORE TERMINATING
+  // exploration process api creating and terminating processes
+  // exit() function
+  // 17
+  free(line);
+  destroyCommandline(currLine);
+  return 0;
+}
 
 struct commandline *createCommandline(char *line) {
   struct commandline *currLine = malloc(sizeof(struct commandline));
@@ -55,20 +95,18 @@ struct commandline *createCommandline(char *line) {
       token = strtok_r(NULL, " ", &saveptr);
       currLine->redirectOutput = calloc(strlen(token) + 1, sizeof(char));
       strcpy(currLine->redirectOutput, token);
-    } else if (strcmp(token, "&") == 0) {
-      currLine->background = true;
     } else {
       // is an arg
       currLine->args[currLine->argsCount++] = token;
     }
   }
-  /*
-  if (currLine->argsCount == 0) {
-    free(currLine->args);
-    currLine->args = calloc(2, sizeof(char *));
-    strcpy(currLine->args[0], currLine->command);
+  // check last arg for &: store as boolean and remove from args
+  if (currLine->argsCount > 0 &&
+      strcmp(currLine->args[currLine->argsCount - 1], "&") == 0) {
+    currLine->background = true;
+    currLine->args[currLine->argsCount - 1] = '\0';
+    --currLine->argsCount;
   }
-  */
   return currLine;
 }
 
@@ -137,11 +175,11 @@ void changeDirectory(struct commandline *currLine) {
   }
 }
 
-void printStatus(struct commandline *currLine) {
+void printExitStatus(bool background) {
   // print either exit status or terminating signal of last foreground process
   // ran by shell exit, cd, status do not count as foreground processes (ie
   // status should ignore build-in commands)
-  if (currLine->background) {
+  if (background) {
     printf("terminated by signal %d\n", lastExitStatus);
   } else {
     printf("exit value %d\n", lastExitStatus);
@@ -156,13 +194,13 @@ void otherCommands(struct commandline *currLine) {
   // for command to complete. parent must return command line access to use
   // immediately after forking
 
-  // copy args to newargv for execvp
-  int newargvLen = currLine->argsCount + 1;
+  // copy args to newargv for execvp: +1 for command and +1 for NULL ptr term
+  int newargvLen = currLine->argsCount + 2;
   char *newargv[newargvLen];
-  newargv[newargvLen - 1] = NULL;  // null terminate array
   newargv[0] = currLine->command;  // first is command
+  newargv[newargvLen - 1] = NULL;  // terminated by NULL pointer
   for (int i = 1; i < newargvLen - 1; ++i) {
-    newargv[i] = currLine->args[i];
+    newargv[i] = currLine->args[i - 1];
   }
 
   // fork a new process
@@ -175,72 +213,73 @@ void otherCommands(struct commandline *currLine) {
       break;
     case 0:
       // child process executes this branch
+      if (currLine->background) {
+        printf("background pid is %d\n", getpid());
+        // need signal handler to immediately wait() for child processes to
+        // terminate
+        fflush(stdout);
+      }
+      // dup2 stuff?
+      if (currLine->redirectInput) {
+        // open source file
+        int sourceFD = open(currLine->redirectInput, O_RDONLY);
+        if (sourceFD == -1) {
+          printf("cannot open %s for input\n", currLine->redirectInput);
+          fflush(stdout);
+          exit(1);
+        }
+        // redirect FD 0 (stdin) to source file
+        int result = dup2(sourceFD, 0);
+        if (result == -1) {
+          perror("source dup2()");
+          exit(2);  // CHANGE THIS TO 1
+        }
+      }
+      if (currLine->redirectOutput) {
+        // output redirection
+        int targetFD =
+            open(currLine->redirectOutput, O_WRONLY | O_CREAT | O_TRUNC,
+                 0644);  // 0640 or 0644?
+        if (targetFD == -1) {
+          perror("target open()");
+          exit(1);
+        }
+        // redirect FD 1 (stdout) to targetFD
+        int result = dup2(targetFD, 1);
+        if (result == -1) {
+          perror("dup2");
+          exit(2);  // CHANGE THIS TO 1
+        }
+      }
       execvp(currLine->command, newargv);
       // returns if there is an error
-      perror("execvp");
-      exit(2);
+      // command fails because shell could not find the command to run
+      // set exit status to 1
+      printf("%s: no such file or directory\n", currLine->command);
+      fflush(stdout);
+      exit(1);
       break;
     default:
       // parent process executes this branch
-      // wait for child's termination
-      childPid = waitpid(childPid, &childStatus, 0);
-      // check if child process terminated normally
-      if (WIFEXITED(childStatus)) {
-        lastExitStatus = WEXITSTATUS(childStatus);
-        printf("Child %d exited normally with status %d\n", childPid,
-               WEXITSTATUS(childStatus));
+      if (currLine->background == false) {
+        // wait for child's termination
+        childPid = waitpid(childPid, &childStatus, 0);
+        // check if child process terminated normally
+        if (WIFEXITED(childStatus)) {
+          lastExitStatus = WEXITSTATUS(childStatus);
+          // printf("Child %d exited normally with status %d\n", childPid,
+          //       WEXITSTATUS(childStatus));
+          // fflush(stdout);
+        } else {
+          lastExitStatus = WTERMSIG(childStatus);
+          // printf("Child %d exited abnormally due to signal %d\n", childPid,
+          //       WTERMSIG(childStatus));
+          // fflush(stdout);
+        }
       } else {
-        lastExitStatus = WTERMSIG(childStatus);
-        printf("Child %d exited abnormally due to signal %d\n", childPid,
-               WTERMSIG(childStatus));
+        // background process with WNOHANG
+        childPid = waitpid(childPid, &childStatus, WNOHANG);
       }
-      fflush(stdout);
       break;
   }
-  fflush(stdout);
-}
-
-int main(void) {
-  char *line = malloc(MAX_CMD_LINE * sizeof(char));
-  struct commandline *currLine = getInput(line);
-
-  // command
-  while (currLine == NULL || strcmp(currLine->command, "exit") != 0) {
-    if (currLine == NULL || strcmp(currLine->command, "#") == 0) {
-      // blank or # comment, get input again
-      currLine = getInput(line);
-    } else if (strcmp(currLine->command, "cd") == 0) {
-      // cd
-      changeDirectory(currLine);
-    } else if (strcmp(currLine->command, "status") == 0) {
-      // status
-      printf("%d\n", lastExitStatus);
-      fflush(stdout);
-    } else {
-      // must fork
-      otherCommands(currLine);
-    }
-    currLine = getInput(line);
-  }
-  // "exit" MUST KILL ALL PROCESSES AND JOBS BEFORE TERMINATING
-  // exploration process api creating and terminating processes
-  // exit() function
-  /*// redirect >
-  if (strcmp(argsArray[1], ">") == 0) {
-    // open target file
-    int targetFD = open(argsArray[2], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (targetFD == -1) {
-      perror("target open()");
-      exit(1);
-    }
-    printf("targetFD = %d\n", targetFD);
-    close(1);
-    dup(targetFD);
-    execv(newargv[0], newargv);
-  }
-// 11
-*/
-  free(line);
-  destroyCommandline(currLine);
-  return 0;
 }
