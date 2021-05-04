@@ -142,7 +142,7 @@ struct commandline *createCommandline(char *line) {
     }
   }
 
-  // check last arg for &: store as boolean and remove from args
+  // check last arg for & store as boolean and remove from args
   if (currLine->argsCount > 0 &&
       strcmp(currLine->args[currLine->argsCount - 1], "&") == 0) {
     // disregard & if in foregroundOnly mode
@@ -169,12 +169,6 @@ struct commandline *getInput(char *line) {
   printf(": ");
   fflush(stdout);
   fgets(line, MAX_CMD_LINE, stdin);
-  // input = gets(line);
-  // size_t len = MAX_CMD_LINE;
-  // if (getline(&line, &len, stdin) == -1) {
-  //  printf("blank line\n");
-  //}
-  // ssize_t lineSize = getline(&line, &len, stdin);
   line[strcspn(line, "\n")] = 0;  // remove \n from end of input
   return createCommandline(line);
 }
@@ -223,7 +217,6 @@ void otherCommands(struct commandline *currLine) {
       break;
     case 0:
       // child process executes this branch
-      // dup2 stuff canvas module 5 exploration "Processes and I/O"
       if (currLine->background) {
         // background ignores ctrl+c
         SIGINT_action.sa_handler = SIG_IGN;
@@ -241,6 +234,7 @@ void otherCommands(struct commandline *currLine) {
       }
       sigaction(SIGINT, &SIGINT_action, NULL);
 
+      // dup2 stuff canvas module 5 exploration "Processes and I/O"
       if (currLine->redirectInput) {
         // open source file
         int sourceFD = open(currLine->redirectInput, O_RDONLY);
