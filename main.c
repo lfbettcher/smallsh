@@ -1,9 +1,9 @@
-#include <fcntl.h>   // open?
+#include <fcntl.h>   // open
 #include <limits.h>  // PATH_MAX
 #include <signal.h>
-#include <stdbool.h>  // bool
-#include <stdio.h>    // printf, fflush
-#include <stdlib.h>   // exit
+#include <stdbool.h>
+#include <stdio.h>   // printf, fflush
+#include <stdlib.h>  // exit
 #include <string.h>
 #include <sys/types.h>  // pid_t
 #include <sys/wait.h>   // wait process
@@ -24,31 +24,22 @@ struct commandline {
 struct sigaction SIGINT_action;
 struct sigaction SIGTSTP_action;
 
-// struct commandline *currLine;
 int lastExitStatus = 0;
 int statusOrSignal = 0;
 int smallshPid;
 bool foregroundOnly = false;
 
-// functions declarations
-struct commandline *getInput(char *);
-struct commandline *createCommandline(char *);
-void destroyCommandline(struct commandline *);
-void changeDirectory(struct commandline *);
-void printExitStatus();
-void otherCommands(struct commandline *);
-
 void handleCtrlZ(int signal) {
   char *msg;
   int msgLen;
   if (!foregroundOnly) {
-    msg = "Entering foreground-only mode (& is now ignored)\n: ";
-    msgLen = 52;
+    msg = "\nEntering foreground-only mode (& is now ignored)\n: ";
+    msgLen = 54;
     foregroundOnly = true;
   } else {
-    msg = "Exiting foreground-only mode\n: ";
+    msg = "\nExiting foreground-only mode\n: ";
     foregroundOnly = false;
-    msgLen = 32;
+    msgLen = 34;
   }
   write(STDOUT_FILENO, msg, msgLen);
 }
@@ -65,64 +56,11 @@ void childSignalHandler() {
               WEXITSTATUS(childStatus));
       write(STDOUT_FILENO, msg, 64);
     } else {
-      sprintf(msg, "background pid %d is done: terminated by signal %d\n: ",
+      sprintf(msg, "background pid %d is done: terminated by signal %d\n",
               childPid, WTERMSIG(childStatus));
       write(STDOUT_FILENO, msg, 64);
     }
   }
-}
-
-int main(void) {
-  smallshPid = getpid();
-  char *line = malloc(MAX_CMD_LINE * sizeof(char));
-
-  // signals canvas exploration signal handling api
-  struct sigaction SIGINT_action = {{0}}, SIGTSTP_action = {{0}};
-  // fill out SIGINT_action struct
-  // ignore ctrl+c
-  SIGINT_action.sa_handler = SIG_IGN;
-  // block all catchable signals?
-  sigfillset(&SIGINT_action.sa_mask);
-  // no flags set
-  SIGINT_action.sa_flags = 0;
-  sigaction(SIGINT, &SIGINT_action, NULL);
-
-  // fill out SIGTSTP_action struct
-  // register handleCtrlZ as the signal handler
-  SIGTSTP_action.sa_handler = handleCtrlZ;
-  // block all catchable signals while handleCtrlZ is running
-  sigfillset(&SIGTSTP_action.sa_mask);
-  // no flags set
-  // SIGTSTP_action.sa_flags = 0;
-  SIGTSTP_action.sa_flags = SA_RESTART;
-  sigaction(SIGTSTP, &SIGTSTP_action, NULL);
-
-  // get input
-  struct commandline *currLine = getInput(line);
-  // command
-  while (currLine == NULL || strcmp(currLine->command, "exit") != 0) {
-    if (currLine == NULL || strcmp(currLine->command, "#") == 0) {
-      // blank or # comment, do nothing
-    } else if (strcmp(currLine->command, "cd") == 0) {
-      // cd
-      changeDirectory(currLine);
-    } else if (strcmp(currLine->command, "status") == 0) {
-      // status
-      printExitStatus();
-    } else {
-      // must fork
-      otherCommands(currLine);
-    }
-    currLine = getInput(line);
-  }
-  // "exit" MUST KILL ALL PROCESSES AND JOBS BEFORE TERMINATING
-  // exploration process api creating and terminating processes
-  // exit() function
-  // make array of background processes and kill them all
-  // 38
-  free(line);
-  destroyCommandline(currLine);
-  return 0;
 }
 
 struct commandline *createCommandline(char *line) {
@@ -134,7 +72,7 @@ struct commandline *createCommandline(char *line) {
   currLine->redirectOutput = NULL;
   currLine->background = false;
 
-  // check first character for #
+  // check first character for # comment
   char first = line[0];
   if (first == '#') {
     currLine->command = strdup("#");
@@ -207,6 +145,7 @@ struct commandline *createCommandline(char *line) {
   // check last arg for &: store as boolean and remove from args
   if (currLine->argsCount > 0 &&
       strcmp(currLine->args[currLine->argsCount - 1], "&") == 0) {
+    // disregard & if in foregroundOnly mode
     if (!foregroundOnly) {
       currLine->background = true;
     }
@@ -242,25 +181,14 @@ struct commandline *getInput(char *line) {
 
 void changeDirectory(struct commandline *currLine) {
   if (currLine->args == NULL || currLine->argsCount == 0) {
-    // home directory
-    chdir(getenv("HOME"));
-    fflush(stdout);
+    chdir(getenv("HOME"));  // no args, home directory
   } else {
-    char *destDir = currLine->args[0];
-    char *cwd = getcwd(NULL, PATH_MAX);
-    if (cwd == NULL) {
-      perror("getcwd()");
-      exit(1);
-    }
-    chdir(destDir);
-    free(cwd);
+    chdir(currLine->args[0]);  // directory in args
   }
 }
 
 void printExitStatus() {
-  // print either exit status or terminating signal of last foreground
-  // process ran by shell exit, cd, status do not count as foreground
-  // processes (ie status should ignore build-in commands)
+  // print exit status or terminating signal of last foreground process
   if (statusOrSignal == 0) {
     printf("exit value %d\n", lastExitStatus);  // status
   } else {
@@ -269,27 +197,7 @@ void printExitStatus() {
   fflush(stdout);
 }
 
-void backgroundPidExit(int *childStatus) {
-  pid_t childPid = 0;
-  while (childPid <= 0) {
-    childPid = waitpid(-1, childStatus, WNOHANG);
-  }
-
-  char msg[64];
-  memset(msg, '\0', 64);
-  if (WIFEXITED(childStatus)) {
-    sprintf(msg, "background pid %d is done: exit value %d\n", childPid,
-            WEXITSTATUS(childStatus));
-    write(STDOUT_FILENO, msg, 64);
-  } else {
-    sprintf(msg, "background pid %d is done: terminated by signal %d\n",
-            childPid, WTERMSIG(&childStatus));
-    write(STDOUT_FILENO, msg, 64);
-  }
-}
-
 void otherCommands(struct commandline *currLine) {
-  // module exploration "process api executing a new program"
   // copy args to newargv for execvp: +1 for command and +1 for NULL ptr
   int newargvLen = currLine->argsCount + 2;
   char *newargv[newargvLen];
@@ -299,15 +207,13 @@ void otherCommands(struct commandline *currLine) {
     newargv[i] = currLine->args[i - 1];
   }
 
-  // fork a new process
   if (currLine->background) {
-    // let parent process know when child process finishes
+    // background process signal to let parent know when child finishes
     signal(SIGCHLD, childSignalHandler);
   }
-  /* else {
-     signal(SIGCHLD, SIG_IGN);
-   }*/
 
+  // canvas module exploration "process api executing a new program"
+  // fork a new process
   pid_t childPid = fork();
   int childStatus;
 
@@ -330,10 +236,11 @@ void otherCommands(struct commandline *currLine) {
           dup2(devNull, STDOUT_FILENO);
         }
       } else {
-        // not background, foreground process needs ctrl+c to work
+        // foreground process needs ctrl+c to work
         SIGINT_action.sa_handler = SIG_DFL;
       }
       sigaction(SIGINT, &SIGINT_action, NULL);
+
       if (currLine->redirectInput) {
         // open source file
         int sourceFD = open(currLine->redirectInput, O_RDONLY);
@@ -361,9 +268,9 @@ void otherCommands(struct commandline *currLine) {
           exit(1);
         }
         // redirect FD 1 (stdout) to targetFD
-        int result = dup2(targetFD, 1);
+        int result = dup2(targetFD, STDOUT_FILENO);
         if (result == -1) {
-          printf("dup2() cannot redirect stdout to target file %s\n",
+          printf("cannot redirect stdout to target file %s\n",
                  currLine->redirectOutput);
           fflush(stdout);
           exit(1);
@@ -398,4 +305,42 @@ void otherCommands(struct commandline *currLine) {
       }
       break;
   }
+}
+
+int main(void) {
+  smallshPid = getpid();
+  char *line = malloc(MAX_CMD_LINE * sizeof(char));
+
+  struct sigaction SIGINT_action = {{0}}, SIGTSTP_action = {{0}};
+
+  // SIGINT: ignore ctrl+c
+  SIGINT_action.sa_handler = SIG_IGN;
+  sigfillset(&SIGINT_action.sa_mask);  // block all catchable signals
+  SIGINT_action.sa_flags = 0;          // no flags set
+  sigaction(SIGINT, &SIGINT_action, NULL);
+
+  // SIGTSTP: ctrl+z action
+  SIGTSTP_action.sa_handler = handleCtrlZ;
+  sigfillset(&SIGTSTP_action.sa_mask);  // block all catchable signals
+  SIGTSTP_action.sa_flags = SA_RESTART;
+  sigaction(SIGTSTP, &SIGTSTP_action, NULL);
+
+  // get input
+  struct commandline *currLine = getInput(line);
+
+  while (currLine == NULL || strcmp(currLine->command, "exit") != 0) {
+    if (currLine == NULL || strcmp(currLine->command, "#") == 0) {
+      // blank or # comment, do nothing
+    } else if (strcmp(currLine->command, "cd") == 0) {
+      changeDirectory(currLine);
+    } else if (strcmp(currLine->command, "status") == 0) {
+      printExitStatus();
+    } else {
+      otherCommands(currLine);  // with fork
+    }
+    currLine = getInput(line);  // get next input
+  }
+  free(line);
+  destroyCommandline(currLine);
+  return 0;
 }
